@@ -1,0 +1,63 @@
+# ---------------------------------------------------
+# Environment / secrets - NEVER commit real credentials
+# ---------------------------------------------------
+.env
+backend/.env
+*.env
+!.env.example
+!backend/.env.example
+
+# ---------------------------------------------------
+# Python
+# ---------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+backend/venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# ---------------------------------------------------
+# ML models / datasets (Phase 3+ / Phase 5+)
+# Trained model files can be large and are regenerable -
+# do not commit raw datasets or trained models to git.
+# ---------------------------------------------------
+backend/ml/models/*.pkl
+backend/ml/models/*.joblib
+backend/ml/datasets/*.csv
+!backend/ml/models/.gitkeep
+!backend/ml/datasets/.gitkeep
+
+# ---------------------------------------------------
+# Node / Frontend (Phase 7+)
+# ---------------------------------------------------
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.env
+*.local
+
+# ---------------------------------------------------
+# IDE / OS
+# ---------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------
+# Logs
+# ---------------------------------------------------
+*.log
+logs/
+*.zip
+backend/ml/datasets/data.txt
