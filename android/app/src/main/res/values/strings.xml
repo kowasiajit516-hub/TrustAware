@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">TrustAware</string>
+    <string name="title_activity_main">TrustAware</string>
+    <string name="package_name">com.example.trustaware</string>
+    <string name="custom_url_scheme">com.example.trustaware</string>
+</resources>

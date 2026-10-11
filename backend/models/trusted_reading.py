@@ -35,12 +35,20 @@ class TrustedReadingResponse(BaseModel):
     raw_value: float = Field(
         ..., description="the original raw value - always retained, never deleted (rule #8)"
     )
-    trusted_value: float = Field(
-        ..., description="the value automation/actuators should use going forward (Phase 6/9)"
+    trusted_value: float | None = Field(
+        default=None,
+        description="the value automation/actuators use. None => UNAVAILABLE (no safe value exists; automation is held)",
     )
     source: str = Field(
-        ..., description="'RAW' if the sensor was HEALTHY at prediction time, 'VIRTUAL' if predicted"
+        ..., description="'RAW' (real sensor), 'VIRTUAL' (predicted), 'REDUNDANT' (peer sensor) or 'UNAVAILABLE'"
     )
+    available: bool = Field(default=True, description="False when no safe trusted value could be produced")
+    raw_isolated: bool = Field(default=False, description="True when the raw value was kept out of the trusted chain")
+    unavailable_reason: str | None = None
+    recovery_state: str | None = Field(default=None, description="NORMAL / FAULT / VERIFYING / RECOVERED at this reading")
+    calibrated_value: float | None = None
+    filtered_value: float | None = None
+    redundant_sources: list[str] | None = None
     status_at_prediction: str = Field(
         ..., description="the sensor's SensorStatus at the moment this trusted value was computed"
     )

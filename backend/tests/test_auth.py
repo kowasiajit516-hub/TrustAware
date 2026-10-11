@@ -160,3 +160,121 @@ async def test_existing_sensor_routes_stay_unauthenticated(client):
     """Rule #11: Phase 1-6 routes must not start requiring auth."""
     resp = await client.get("/sensors")
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------
+# Google Sign-In
+#
+# We can't call real Google servers from a test suite, so the one thing
+# mocked here is the cryptographic verification step itself
+# (google_id_token.verify_oauth2_token) - everything downstream (our
+# account creation, account linking, JWT issuance) runs for real
+# against the real service/route code, exactly like every other test
+# in this file.
+# ---------------------------------------------------------------------
+
+GOOGLE_CLAIMS = {
+    "sub": "109876543210987654321",
+    "email": "google.user@example.com",
+    "email_verified": True,
+    "name": "Google User",
+}
+
+
+@pytest.mark.asyncio
+async def test_google_login_disabled_returns_503_when_unconfigured(client, monkeypatch):
+    from config import settings
+
+    monkeypatch.setattr(settings, "google_client_id", "")
+    resp = await client.post("/auth/google", json={"id_token": "whatever"})
+    assert resp.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_google_login_creates_new_account(client, monkeypatch):
+    from config import settings
+    from services import auth_service
+
+    monkeypatch.setattr(settings, "google_client_id", "test-client-id")
+    monkeypatch.setattr(
+        auth_service.google_id_token, "verify_oauth2_token", lambda *a, **k: GOOGLE_CLAIMS
+    )
+
+    resp = await client.post("/auth/google", json={"id_token": "fake-but-verified-token"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["access_token"]
+    assert data["user"]["email"] == "google.user@example.com"
+    assert data["user"]["auth_provider"] == "google"
+    assert data["user"]["email_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_google_login_is_idempotent_for_same_user(client, monkeypatch):
+    """Signing in twice with the same Google account must not create two users."""
+    from config import settings
+    from services import auth_service
+
+    monkeypatch.setattr(settings, "google_client_id", "test-client-id")
+    monkeypatch.setattr(
+        auth_service.google_id_token, "verify_oauth2_token", lambda *a, **k: GOOGLE_CLAIMS
+    )
+
+    first = await client.post("/auth/google", json={"id_token": "token-1"})
+    second = await client.post("/auth/google", json={"id_token": "token-2"})
+    assert first.json()["user"]["user_id"] == second.json()["user"]["user_id"]
+
+
+@pytest.mark.asyncio
+async def test_google_login_links_to_existing_password_account(client, monkeypatch):
+    """
+    Someone who registered with email+password, then later clicks
+    "Continue with Google" using the SAME email, should log into their
+    existing account - not get a second, disconnected one.
+    """
+    from config import settings
+    from services import auth_service
+
+    payload = sample_user_payload("linked.user@example.com")
+    register_resp = await client.post("/auth/register", json=payload)
+    original_user_id = register_resp.json()["user"]["user_id"]
+
+    monkeypatch.setattr(settings, "google_client_id", "test-client-id")
+    linked_claims = {**GOOGLE_CLAIMS, "email": "linked.user@example.com"}
+    monkeypatch.setattr(
+        auth_service.google_id_token, "verify_oauth2_token", lambda *a, **k: linked_claims
+    )
+
+    resp = await client.post("/auth/google", json={"id_token": "token"})
+    assert resp.status_code == 200
+    assert resp.json()["user"]["user_id"] == original_user_id
+
+
+@pytest.mark.asyncio
+async def test_google_login_rejects_unverified_email(client, monkeypatch):
+    from config import settings
+    from services import auth_service
+
+    monkeypatch.setattr(settings, "google_client_id", "test-client-id")
+    unverified_claims = {**GOOGLE_CLAIMS, "email_verified": False}
+    monkeypatch.setattr(
+        auth_service.google_id_token, "verify_oauth2_token", lambda *a, **k: unverified_claims
+    )
+
+    resp = await client.post("/auth/google", json={"id_token": "token"})
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_google_login_rejects_invalid_token(client, monkeypatch):
+    from config import settings
+    from services import auth_service
+
+    def _raise(*args, **kwargs):
+        raise ValueError("Token used too late")
+
+    monkeypatch.setattr(settings, "google_client_id", "test-client-id")
+    monkeypatch.setattr(auth_service.google_id_token, "verify_oauth2_token", _raise)
+
+    resp = await client.post("/auth/google", json={"id_token": "expired-token"})
+    assert resp.status_code == 401

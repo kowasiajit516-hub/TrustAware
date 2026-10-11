@@ -52,6 +52,12 @@ class ResetPasswordRequest(BaseModel):
     new_password: str = Field(..., min_length=8, max_length=128)
 
 
+class GoogleLoginRequest(BaseModel):
+    """Payload for POST /auth/google - a Google Identity Services ID token."""
+
+    id_token: str = Field(..., description="The credential/ID token returned by Google Identity Services")
+
+
 class UserResponse(BaseModel):
     """What the API returns for a user (never includes the password hash)."""
 
@@ -60,6 +66,9 @@ class UserResponse(BaseModel):
     email: EmailStr
     role: UserRole = UserRole.ADMIN
     email_verified: bool = False
+    auth_provider: str = Field(
+        default="local", description="'local' (email+password) or 'google'"
+    )
     created_at: datetime
     updated_at: datetime
 

@@ -27,8 +27,8 @@ async def inject_fault(
     payload: FaultInjectionRequest,
     db: AsyncIOMotorDatabase = Depends(get_database),
 ):
-    """Inject a SPIKE/STUCK/DRIFT fault into a real sensor via the real ingestion pipeline."""
-    value, reading = await fault_injection_service.inject_fault(
+    """Inject a fault into a real sensor. All types except MISSING go through the real ingestion pipeline."""
+    value, reading, note = await fault_injection_service.inject_fault(
         db, sensor_id, payload.fault_type, payload.offset
     )
     return {
@@ -36,4 +36,5 @@ async def inject_fault(
         "fault_type": payload.fault_type,
         "injected_value": value,
         "reading": reading,
+        "note": note,
     }

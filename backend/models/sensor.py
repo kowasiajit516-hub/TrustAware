@@ -29,6 +29,8 @@ class SensorType(str, Enum):
     MOTION = "MOTION"
     CURRENT = "CURRENT"
     VOLTAGE = "VOLTAGE"
+    DISTANCE = "DISTANCE"
+    ALTITUDE = "ALTITUDE"
     CUSTOM = "CUSTOM"
 
 

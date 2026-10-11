@@ -39,6 +39,15 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60 * 24  # 24h
 
     # ---------------------------------------------------
+    # Google Sign-In (optional - leave blank to disable)
+    # ---------------------------------------------------
+    # Get this from https://console.cloud.google.com/apis/credentials
+    # (OAuth 2.0 Client ID, type "Web application"). Until this is set,
+    # POST /auth/google returns 503 and the frontend button falls back
+    # to its "not configured" message instead of rendering.
+    google_client_id: str = ""
+
+    # ---------------------------------------------------
     # Logging
     # ---------------------------------------------------
     log_level: str = "INFO"

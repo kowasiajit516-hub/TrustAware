@@ -100,6 +100,7 @@ async def create_indexes() -> None:
     # ---- Phase 7: actuator events, auth ------------------------------
     await db["actuator_events"].create_index([("actuator_id", 1), ("timestamp", -1)])
     await db["users"].create_index("email", unique=True)
+    await db["users"].create_index("google_sub", unique=True, sparse=True)
     await db["password_reset_tokens"].create_index("token_hash", unique=True)
     await db["password_reset_tokens"].create_index("expires_at", expireAfterSeconds=0)
 
@@ -107,4 +108,10 @@ async def create_indexes() -> None:
     # NEW - required for this handover. If you already have this file,
     # this is the one line to add inside your real create_indexes().
     await db["node_commands"].create_index([("node_id", 1), ("status", 1), ("created_at", 1)])
+
+    # ---- Google Sign-In addition --------------------------------------
+    # sparse=True is required here: only Google-linked accounts have a
+    # google_sub field at all, so a plain unique index would otherwise
+    # try to enforce uniqueness across many documents that are all
+    # missing the field (which some MongoDB versions reject outright).
     logger.info("MongoDB indexes ensured")

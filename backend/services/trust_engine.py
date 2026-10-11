@@ -42,34 +42,35 @@ SENSORS_COLLECTION = "sensors"
 SENSOR_HEALTH_COLLECTION = "sensor_health"
 
 # ---------------------------------------------------------------------
-# Tunable trust-model parameters. Deliberately generic - never keyed by
-# sensor_type, per the master plan's "no per-type hardcoded logic" rule.
+# Default trust-model parameters. These are the FALLBACK values used
+# only if services/settings_service.get_settings() can't be reached
+# for some reason - the real, live values are read from the
+# system_settings collection at the top of update_trust() every call,
+# so an operator can tune these via PUT /settings without redeploying.
+# Deliberately generic - never keyed by sensor_type, per the master
+# plan's "no per-type hardcoded logic" rule.
 # ---------------------------------------------------------------------
-
-# How much trust drops for each reading flagged is_fault=True.
 FAULT_PENALTY = 20.0
-
-# How much trust recovers for each reading flagged is_fault=False.
-# Smaller than the penalty on purpose: trust should be quick to lose and
-# slower to rebuild, so a sensor has to prove itself healthy again
-# before automation fully trusts it.
 RECOVERY_GAIN = 5.0
-
 TRUST_MIN = 0.0
 TRUST_MAX = 100.0
+FAULTY_THRESHOLD = 50.0
+HEALTHY_THRESHOLD = 90.0
+# Recovery verification: after a fault the REAL sensor is only trusted again once this many
+# CONSECUTIVE non-fault readings have been seen AND trust is back in the healthy band
+# (tunable: settings.recovery_verify_readings). RECOVERED is shown for a short hold, then NORMAL.
+RECOVERY_VERIFY_READINGS = 5
+RECOVERED_HOLD_READINGS = 10
+# Corroborating evidence (e.g. Isolation Forest AND baseline breach AND validation failure)
+# increases the penalty; a single piece of evidence keeps the configured fault_penalty.
+EVIDENCE_PENALTY_STEP = 0.25
+MAX_SEVERITY = 1.75
 
-# Status thresholds, derived from the resulting trust_score.
-FAULTY_THRESHOLD = 50.0    # trust_score < this   -> FAULTY
-HEALTHY_THRESHOLD = 90.0   # trust_score >= this   -> HEALTHY
-# Anything in between (>= FAULTY_THRESHOLD and < HEALTHY_THRESHOLD) is
-# RECOVERING - either climbing back up after faults, or dipping down
-# from healthy but not yet bad enough to call outright faulty.
 
-
-def _derive_status(trust_score: float) -> SensorStatus:
-    if trust_score < FAULTY_THRESHOLD:
+def _derive_status(trust_score: float, faulty_threshold: float, healthy_threshold: float) -> SensorStatus:
+    if trust_score < faulty_threshold:
         return SensorStatus.FAULTY
-    if trust_score < HEALTHY_THRESHOLD:
+    if trust_score < healthy_threshold:
         return SensorStatus.RECOVERING
     return SensorStatus.HEALTHY
 
@@ -97,33 +98,85 @@ async def update_trust(db: AsyncIOMotorDatabase, prediction: dict) -> dict:
     if sensor is None:
         raise ValueError(f"Cannot update trust: unknown sensor_id='{sensor_id}'")
 
+    # Live, operator-tunable parameters (PUT /settings) - falls back to
+    # the module defaults above if settings can't be read for any reason,
+    # so a settings-service hiccup can never break trust scoring.
+    try:
+        from services import settings_service
+
+        settings = await settings_service.get_settings(db)
+        fault_penalty = float(settings.get("fault_penalty", FAULT_PENALTY))
+        recovery_gain = float(settings.get("recovery_gain", RECOVERY_GAIN))
+        trust_min = float(settings.get("trust_min", TRUST_MIN))
+        trust_max = float(settings.get("trust_max", TRUST_MAX))
+        faulty_threshold = float(settings.get("faulty_threshold", FAULTY_THRESHOLD))
+        healthy_threshold = float(settings.get("healthy_threshold", HEALTHY_THRESHOLD))
+        recovery_required = int(settings.get("recovery_verify_readings", RECOVERY_VERIFY_READINGS))
+    except Exception:
+        logger.exception("Failed to load live settings; using module defaults.")
+        fault_penalty, recovery_gain = FAULT_PENALTY, RECOVERY_GAIN
+        trust_min, trust_max = TRUST_MIN, TRUST_MAX
+        faulty_threshold, healthy_threshold = FAULTY_THRESHOLD, HEALTHY_THRESHOLD
+        recovery_required = RECOVERY_VERIFY_READINGS
+
     health = await db[SENSOR_HEALTH_COLLECTION].find_one({"sensor_id": sensor_id})
 
     if health is None:
         # First prediction ever seen for this sensor - start from the
         # sensor's current trust_score (100.0 for a brand-new sensor,
         # per models/sensor.py's default).
-        current_trust = float(sensor.get("trust_score", TRUST_MAX))
+        current_trust = float(sensor.get("trust_score", trust_max))
         consecutive_faults = 0
         consecutive_healthy = 0
         previous_status = sensor.get("status", SensorStatus.HEALTHY.value)
+        episode_open, prev_recovery, recovered_hold = False, "NORMAL", 0
     else:
-        current_trust = float(health.get("trust_score", TRUST_MAX))
+        current_trust = float(health.get("trust_score", trust_max))
         consecutive_faults = int(health.get("consecutive_faults", 0))
         consecutive_healthy = int(health.get("consecutive_healthy", 0))
         previous_status = health.get("status")
+        episode_open = bool(health.get("episode_open", False))
+        prev_recovery = health.get("recovery_state", "NORMAL")
+        recovered_hold = int(health.get("recovered_hold", 0))
+
+    fault_reasons = list(prediction.get("fault_reasons") or [])
+    severity = min(MAX_SEVERITY, 1.0 + EVIDENCE_PENALTY_STEP * max(0, len(fault_reasons) - 1))
 
     if is_fault:
-        new_trust = max(TRUST_MIN, current_trust - FAULT_PENALTY)
+        new_trust = max(trust_min, current_trust - fault_penalty * severity)
         consecutive_faults += 1
         consecutive_healthy = 0
     else:
-        new_trust = min(TRUST_MAX, current_trust + RECOVERY_GAIN)
+        new_trust = min(trust_max, current_trust + recovery_gain)
         consecutive_healthy += 1
         consecutive_faults = 0
 
-    new_status = _derive_status(new_trust)
+    new_status = _derive_status(new_trust, faulty_threshold, healthy_threshold)
     now = now_utc()
+
+    # ---- recovery verification state machine -----------------------------
+    # NORMAL -> (fault) FAULT -> (valid readings) VERIFYING -> (N consecutive + healthy trust) RECOVERED -> NORMAL
+    if is_fault:
+        episode_open, recovery_state, recovered_hold = True, "FAULT", 0
+    elif episode_open:
+        if consecutive_healthy >= recovery_required and new_status == SensorStatus.HEALTHY:
+            episode_open, recovery_state, recovered_hold = False, "RECOVERED", 0
+        else:
+            recovery_state = "VERIFYING"
+    elif prev_recovery == "RECOVERED":
+        recovered_hold += 1
+        recovery_state = "RECOVERED" if recovered_hold < RECOVERED_HOLD_READINGS else "NORMAL"
+    else:
+        recovery_state = "NORMAL"
+
+    if new_status == SensorStatus.FAULTY:
+        sensor_state = "FAULT"
+    elif is_fault:
+        sensor_state = "WARNING"
+    elif episode_open or new_status != SensorStatus.HEALTHY:
+        sensor_state = "RECOVERING"
+    else:
+        sensor_state = "HEALTHY"
 
     health_doc = {
         "sensor_id": sensor_id,
@@ -135,6 +188,13 @@ async def update_trust(db: AsyncIOMotorDatabase, prediction: dict) -> dict:
         "last_is_fault": is_fault,
         "last_anomaly_score": prediction.get("anomaly_score"),
         "last_reading_timestamp": prediction.get("timestamp"),
+        "last_fault_reasons": fault_reasons,
+        "penalty_severity": severity if is_fault else None,
+        "episode_open": episode_open,
+        "recovery_state": recovery_state,
+        "recovered_hold": recovered_hold,
+        "recovery_required": recovery_required,
+        "sensor_state": sensor_state,
         "updated_at": now,
     }
 

@@ -67,7 +67,7 @@ async def create_reading(db: AsyncIOMotorDatabase, payload: SensorReadingCreate)
     VALIDATION" honest and decoupled from every later stage in the
     master plan's core pipeline.
     """
-    await ensure_exists(db, SENSORS_COLLECTION, "sensor_id", payload.sensor_id)
+    sensor = await ensure_exists(db, SENSORS_COLLECTION, "sensor_id", payload.sensor_id)
 
     doc = payload.model_dump()
     doc["timestamp"] = payload.timestamp or now_utc()
@@ -80,12 +80,62 @@ async def create_reading(db: AsyncIOMotorDatabase, payload: SensorReadingCreate)
     )
     reading = serialize_mongo_doc(doc)
 
-    await _try_score_reading(db, reading)
+    # NEW: RAW -> CALIBRATION -> FILTERING -> VALIDATION -> learning/fault tracking.
+    # Best-effort and additive: the raw reading above is already stored untouched.
+    context = await _try_process_reading(db, sensor, reading)
+
+    await _try_score_reading(db, reading, context)
+    await _try_finalize_learning(db, context)
 
     return reading
 
 
-async def _try_score_reading(db: AsyncIOMotorDatabase, reading: dict) -> None:
+async def _try_process_reading(db: AsyncIOMotorDatabase, sensor: dict, reading: dict) -> dict:
+    """
+    Calibration / filtering / validation / 30-reading learning / invalid-event
+    recording (services/learning_service.py). Never breaks ingestion; on any
+    failure the AI stage simply runs without the extra context.
+    """
+    from services import learning_service
+
+    try:
+        return await learning_service.process_reading(db, sensor, reading, defer_finalize=True)
+    except Exception:
+        logger.exception(
+            "Reading processing failed for sensor %s; raw reading was still stored.",
+            reading.get("sensor_id"),
+        )
+        return {}
+
+
+async def _try_finalize_learning(db: AsyncIOMotorDatabase, context: dict | None) -> None:
+    """
+    When the user's target number of VALID readings has just been reached, analyse the complete dataset now - after
+    this last reading's AI / trust / trusted-value evidence has been attached. Never breaks ingestion.
+    """
+    sid = (context or {}).get("session_to_finalize")
+    if not sid:
+        return
+    from services import learning_service
+
+    try:
+        await learning_service.finalize_session(db, sid)
+    except Exception:
+        logger.exception("Finalising learning session %s failed; it stays ANALYZING and is retried on the next status read.", sid)
+
+
+async def _try_attach(db: AsyncIOMotorDatabase, kind: str, reading: dict, *args) -> None:
+    """Keep AI / trust / trusted-value evidence with the reading it belongs to. Never breaks ingestion."""
+    from services import learning_service
+
+    try:
+        fn = learning_service.attach_ai if kind == "ai" else learning_service.attach_trust
+        await fn(db, reading["id"], *args)
+    except Exception:
+        logger.exception("Could not attach %s evidence for reading %s", kind, reading.get("id"))
+
+
+async def _try_score_reading(db: AsyncIOMotorDatabase, reading: dict, context: dict | None = None) -> None:
     """
     Best-effort fault-detection scoring, followed by best-effort trust
     scoring if (and only if) a prediction was actually produced. Never
@@ -93,8 +143,15 @@ async def _try_score_reading(db: AsyncIOMotorDatabase, reading: dict) -> None:
     """
     from services import fault_detection
 
+    # Invalid for a non-sensor reason (stale timestamp / non-finite): recorded as an invalid
+    # event already, but it is not evidence of a healthy OR a faulty sensor, so it must not
+    # move trust or become a trusted value.
+    if (context or {}).get("skip_pipeline"):
+        logger.warning("Reading %s skipped by pipeline (invalid, not sensor-side)", reading.get("id"))
+        return
+
     try:
-        prediction = await fault_detection.score_reading(db, reading)
+        prediction = await fault_detection.score_reading(db, reading, context)
     except fault_detection.FaultDetectionUnavailable as exc:
         logger.warning("Skipping fault detection: %s", exc)
         return
@@ -105,10 +162,11 @@ async def _try_score_reading(db: AsyncIOMotorDatabase, reading: dict) -> None:
         )
         return
 
-    await _try_update_trust(db, reading, prediction)
+    await _try_attach(db, "ai", reading, prediction)
+    await _try_update_trust(db, reading, prediction, context)
 
 
-async def _try_update_trust(db: AsyncIOMotorDatabase, reading: dict, prediction: dict) -> None:
+async def _try_update_trust(db: AsyncIOMotorDatabase, reading: dict, prediction: dict, context: dict | None = None) -> None:
     """
     Best-effort dynamic trust scoring, followed by best-effort virtual
     sensing / trusted-value computation if (and only if) a health
@@ -125,27 +183,43 @@ async def _try_update_trust(db: AsyncIOMotorDatabase, reading: dict, prediction:
         )
         return
 
-    await _try_compute_trusted_value(db, reading, health)
+    await _try_compute_trusted_value(db, reading, health, context)
 
 
-async def _try_compute_trusted_value(db: AsyncIOMotorDatabase, reading: dict, health: dict) -> None:
+async def _try_compute_trusted_value(
+    db: AsyncIOMotorDatabase, reading: dict, health: dict, context: dict | None = None
+) -> None:
     """
-    Best-effort virtual sensing / trusted-value computation, followed
-    by best-effort automation-rule evaluation (Phase 9) if (and only
-    if) a trusted value was actually produced. Never breaks ingestion.
+    REAL / VIRTUAL / REDUNDANT decision -> TRUSTED VALUE, then (only if a safe trusted value
+    exists) the automation engine. If no safe value can be produced an UNAVAILABLE trusted
+    reading is stored and automation is NOT run, so no actuator decision is made from an
+    unknown or known-faulty value (the actuator simply holds its last state).
+    Never breaks ingestion.
     """
     from services import virtual_sensor
 
+    status_, recovery = health["status"], health.get("recovery_state")
     try:
-        trusted_reading = await virtual_sensor.compute_trusted_value(db, reading, health["status"])
+        trusted_reading = await virtual_sensor.compute_trusted_value(db, reading, status_, recovery, context)
     except virtual_sensor.VirtualSensorUnavailable as exc:
-        logger.warning("Skipping virtual sensing: %s", exc)
-        return
+        logger.warning("No safe trusted value: %s", exc)
+        try:
+            trusted_reading = await virtual_sensor.record_unavailable(
+                db, reading, status_, recovery, str(exc), context)
+        except Exception:
+            logger.exception("Could not record UNAVAILABLE trusted reading for %s", reading.get("sensor_id"))
+            return
     except Exception:
         logger.exception(
             "Virtual sensing failed for sensor %s; trust update was still stored.",
             reading.get("sensor_id"),
         )
+        return
+
+    await _try_attach(db, "trust", reading, health, trusted_reading)
+
+    if trusted_reading.get("trusted_value") is None:
+        logger.warning("Automation held for sensor %s: trusted value unavailable.", reading.get("sensor_id"))
         return
 
     await _try_evaluate_automation(db, trusted_reading)

@@ -24,7 +24,7 @@ from pathlib import Path
 import joblib
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from ml.feature_engineering import compute_feature_vector
+from ml.feature_engineering import FEATURE_NAMES, compute_feature_vector
 from models.reading import now_utc
 from utils.validators import ensure_exists, serialize_mongo_doc
 
@@ -99,7 +99,7 @@ async def _fetch_history_values(
     return values
 
 
-async def score_reading(db: AsyncIOMotorDatabase, reading: dict) -> dict:
+async def score_reading(db: AsyncIOMotorDatabase, reading: dict, context: dict | None = None) -> dict:
     """
     Score one already-stored raw reading (as returned by
     reading_service.create_reading, i.e. it has an "id" field) and
@@ -118,8 +118,43 @@ async def score_reading(db: AsyncIOMotorDatabase, reading: dict) -> dict:
         reading["value"], sensor["normal_min"], sensor["normal_max"], history
     )
 
+    # Cold start: with exactly ONE prior value the rolling std is undefined and the z-score
+    # degenerates to |diff| / 1e-6, flagging a perfectly normal 2nd reading. Ignore only that
+    # one undefined feature; deviation / delta / stuck still catch real faults.
+    if len(history) == 1:
+        features[FEATURE_NAMES.index("zscore")] = 0.0
+
     anomaly_score = float(model.decision_function([features])[0])
-    is_fault = bool(model.predict([features])[0] == -1)
+    if_fault = bool(model.predict([features])[0] == -1)
+
+    # Extra evidence (all optional; absent => behaviour identical to before):
+    #  - forced_fault_reason: reading failed sensor-side validation (e.g. physical range)
+    #  - baseline: deviation from the sensor's learned 30-reading baseline
+    context = context or {}
+    forced_reason = context.get("forced_fault_reason")
+    baseline_z, baseline_breach = None, False
+    try:
+        from services import learning_service
+        from services.learning_stats import baseline_check
+
+        baseline = await learning_service.get_active_baseline(db, reading["sensor_id"])
+        if baseline:
+            chk = baseline_check(
+                context.get("calibrated_value", reading["value"]), baseline,
+                sensor["normal_min"], sensor["normal_max"],
+            )
+            baseline_z, baseline_breach = chk["baseline_z"], chk["breach"]
+    except Exception:
+        logger.exception("Baseline check failed for sensor %s; continuing without it.", reading["sensor_id"])
+
+    fault_reasons = []
+    if if_fault:
+        fault_reasons.append("ISOLATION_FOREST")
+    if baseline_breach:
+        fault_reasons.append("BASELINE_BREACH")
+    if forced_reason:
+        fault_reasons.append(forced_reason)
+    is_fault = bool(fault_reasons)
 
     doc = {
         "sensor_id": reading["sensor_id"],
@@ -128,6 +163,9 @@ async def score_reading(db: AsyncIOMotorDatabase, reading: dict) -> dict:
         "timestamp": reading["timestamp"],
         "anomaly_score": anomaly_score,
         "is_fault": is_fault,
+        "fault_reasons": fault_reasons,
+        "baseline_z": baseline_z,
+        "baseline_breach": baseline_breach,
         "model_version": _model_cache.get("mtime_iso") or str(MODEL_PATH.stat().st_mtime),
         "created_at": now_utc(),
     }

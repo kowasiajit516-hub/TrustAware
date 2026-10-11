@@ -44,6 +44,7 @@ def _user_to_response(doc: dict) -> dict:
         "email": doc["email"],
         "role": doc.get("role", UserRole.ADMIN.value),
         "email_verified": doc.get("email_verified", False),
+        "auth_provider": doc.get("auth_provider", "local"),
         "created_at": doc["created_at"],
         "updated_at": doc["updated_at"],
     }
@@ -65,6 +66,7 @@ async def register(db: AsyncIOMotorDatabase, payload: UserRegister) -> tuple[dic
         "password_hash": hash_password(payload.password),
         "role": UserRole.ADMIN.value,
         "email_verified": False,
+        "auth_provider": "local",
         "created_at": now,
         "updated_at": now,
     }
@@ -80,7 +82,9 @@ async def register(db: AsyncIOMotorDatabase, payload: UserRegister) -> tuple[dic
 async def login(db: AsyncIOMotorDatabase, email: str, password: str) -> tuple[dict, str]:
     """Verify credentials and return (user, token). 401 on any mismatch."""
     doc = await db[USERS_COLLECTION].find_one({"email": email.lower()})
-    if doc is None or not verify_password(password, doc["password_hash"]):
+    if doc is None or doc.get("password_hash") is None or not verify_password(
+        password, doc["password_hash"]
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -89,6 +93,75 @@ async def login(db: AsyncIOMotorDatabase, email: str, password: str) -> tuple[di
     user = _user_to_response(doc)
     token = create_access_token(subject=user["user_id"])
     logger.info("User logged in: %s", email)
+    return user, token
+
+
+async def google_login(db: AsyncIOMotorDatabase, id_token_str: str) -> tuple[dict, str]:
+    """
+    Verify a Google Identity Services ID token server-side, then find or
+    create a matching user and return (user, token) - same JWT shape as
+    a normal login, so the frontend treats both identically.
+
+    Real verification via google-auth (checks the token's signature
+    against Google's public keys and confirms `aud` matches our
+    configured client ID) - never trusts the token's claims blindly.
+    """
+    from config import settings
+
+    if not settings.google_client_id:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google sign-in is not configured on this server",
+        )
+
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token as google_id_token
+
+    try:
+        idinfo = google_id_token.verify_oauth2_token(
+            id_token_str, google_requests.Request(), settings.google_client_id
+        )
+    except ValueError as e:
+        # Log the REAL reason server-side (wrong audience, expired token,
+        # wrong issuer, etc.) - never expose the raw message to the client,
+        # but this is exactly what's needed to diagnose a mismatch.
+        logger.warning("Google token verification failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Google credential",
+        )
+
+    email = idinfo.get("email")
+    if not email or not idinfo.get("email_verified", False):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Google account has no verified email",
+        )
+
+    now = now_utc()
+    email = email.lower()
+    doc = await db[USERS_COLLECTION].find_one({"email": email})
+
+    if doc is None:
+        doc = {
+            "full_name": idinfo.get("name") or email.split("@")[0],
+            "email": email,
+            "password_hash": None,  # Google-only account, no local password
+            "role": UserRole.ADMIN.value,
+            "email_verified": True,
+            "auth_provider": "google",
+            "google_sub": idinfo.get("sub"),
+            "created_at": now,
+            "updated_at": now,
+        }
+        result = await db[USERS_COLLECTION].insert_one(doc)
+        doc["_id"] = result.inserted_id
+        logger.info("New user registered via Google: %s", email)
+    else:
+        logger.info("User logged in via Google: %s", email)
+
+    user = _user_to_response(doc)
+    token = create_access_token(subject=user["user_id"])
     return user, token
 
 

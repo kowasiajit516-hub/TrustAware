@@ -53,8 +53,16 @@ MODEL_PATH = Path(__file__).resolve().parent.parent / "ml" / "models" / "random_
 # (must be >= ml.virtual_sensor_features.WINDOW; a small buffer is fine).
 HISTORY_LOOKBACK = 20
 
-SOURCE_RAW = "RAW"
+SOURCE_RAW = "RAW"            # shown as REAL on the dashboard
 SOURCE_VIRTUAL = "VIRTUAL"
+SOURCE_REDUNDANT = "REDUNDANT"
+SOURCE_UNAVAILABLE = "UNAVAILABLE"
+
+# A virtual value is only produced from real trusted history. With fewer
+# trusted readings than this the model would be guessing, so the trusted
+# value is reported UNAVAILABLE instead (tunable: settings.virtual_min_history).
+MIN_VIRTUAL_HISTORY = 3
+HOLD_STATES = ("FAULT", "VERIFYING")   # recovery states in which the real sensor is NOT yet trusted
 
 
 class VirtualSensorUnavailable(RuntimeError):
@@ -106,7 +114,8 @@ async def _fetch_trusted_history(
     """
     cursor = (
         db[TRUSTED_READINGS_COLLECTION]
-        .find({"sensor_id": sensor_id, "timestamp": {"$lt": before_timestamp}})
+        .find({"sensor_id": sensor_id, "timestamp": {"$lt": before_timestamp},
+               "trusted_value": {"$ne": None}})
         .sort([("timestamp", -1), ("_id", -1)])
         .limit(limit)
     )
@@ -115,63 +124,145 @@ async def _fetch_trusted_history(
     return values
 
 
-async def compute_trusted_value(db: AsyncIOMotorDatabase, reading: dict, status: str) -> dict:
-    """
-    Core Phase 5 entrypoint. `reading` is the raw stored reading dict
-    (has id, sensor_id, value, timestamp - the same shape
-    services/fault_detection.py consumes). `status` is the sensor's
-    CURRENT SensorStatus value string, as just derived by Phase 4's
-    trust_engine.update_trust for this exact reading.
+async def _min_history(db) -> int:
+    try:
+        from services import settings_service
 
-    Persists and returns the resulting trusted_readings document.
+        return int((await settings_service.get_settings(db)).get("virtual_min_history", MIN_VIRTUAL_HISTORY))
+    except Exception:
+        return MIN_VIRTUAL_HISTORY
 
-    Raises ValueError for an unknown sensor_id, and
-    VirtualSensorUnavailable if the sensor is untrusted but no trained
-    model exists yet - callers (reading_service) decide whether that
-    should fail the request or just be logged, same pattern as
-    fault_detection.FaultDetectionUnavailable.
+
+async def _redundant_value(db, sensor: dict, reading: dict):
     """
+    REDUNDANT source: median of the latest REAL trusted values of peer sensors the
+    user declared as redundant (PUT /sensor-processing/{id} redundant_with=[...]).
+    Peers must be same unit, enabled, currently HEALTHY and not themselves being
+    verified, with a fresh REAL trusted reading. Returns (value, [peer ids]) or None.
+    """
+    from services.learning_service import _utc
+
+    cfg = await db["sensor_processing"].find_one({"sensor_id": sensor["sensor_id"]}) or {}
+    values, used = [], []
+    ts = _utc(reading["timestamp"])
+    for pid in cfg.get("redundant_with") or []:
+        peer = await db[SENSORS_COLLECTION].find_one({"sensor_id": pid})
+        if not peer or not peer.get("enabled", True) or peer.get("unit") != sensor.get("unit"):
+            continue
+        health = await db["sensor_health"].find_one({"sensor_id": pid})
+        if not health or health.get("status") != SensorStatus.HEALTHY.value \
+                or health.get("recovery_state") in HOLD_STATES:
+            continue
+        tr = await db[TRUSTED_READINGS_COLLECTION].find_one(
+            {"sensor_id": pid}, sort=[("timestamp", -1), ("_id", -1)])
+        if not tr or tr.get("source") != SOURCE_RAW or tr.get("trusted_value") is None:
+            continue
+        max_age = max(30.0, 3.0 * float(peer.get("sampling_interval_seconds", 5)))
+        if abs((ts - _utc(tr["timestamp"])).total_seconds()) > max_age:
+            continue
+        values.append(float(tr["trusted_value"]))
+        used.append(pid)
+    if not values:
+        return None
+    import statistics
+
+    return float(statistics.median(values)), used
+
+
+def _build_doc(reading, status, recovery_state, context, *, trusted_value, source, extra=None) -> dict:
+    return {
+        "sensor_id": reading["sensor_id"],
+        "reading_id": reading["id"],
+        "raw_value": reading["value"],
+        "calibrated_value": context.get("calibrated_value"),
+        "filtered_value": context.get("filtered_value"),
+        "trusted_value": trusted_value,
+        "source": source,
+        "available": trusted_value is not None,
+        "raw_isolated": source != SOURCE_RAW,
+        "status_at_prediction": status,
+        "recovery_state": recovery_state,
+        "timestamp": reading["timestamp"],
+        "created_at": now_utc(),
+        **(extra or {}),
+    }
+
+
+async def _store(db, doc: dict) -> dict:
+    result = await db[TRUSTED_READINGS_COLLECTION].insert_one(doc)
+    doc["id"] = str(result.inserted_id)
+    return serialize_mongo_doc(doc)
+
+
+async def compute_trusted_value(
+    db: AsyncIOMotorDatabase, reading: dict, status: str,
+    recovery_state: str | None = None, context: dict | None = None,
+) -> dict:
+    """
+    REAL / VIRTUAL / REDUNDANT decision + TRUSTED VALUE.
+
+      REAL (stored as source="RAW"): sensor HEALTHY and not in a fault/recovery-verification
+        episode -> the CALIBRATED reading (identity calibration = the raw value).
+      otherwise the raw value is isolated and a substitute is used, in order:
+        REDUNDANT  - a declared, healthy peer sensor's real trusted value
+        VIRTUAL    - RandomForest prediction from this sensor's own trusted history
+                     (never from the current untrusted raw value - no leakage)
+      If neither is possible, VirtualSensorUnavailable is raised (no value is invented);
+      reading_service then stores an UNAVAILABLE trusted reading via record_unavailable().
+
+    `recovery_state` / `context` are optional; omitted => legacy behaviour.
+    """
+    context = context or {}
     sensor_id = reading["sensor_id"]
     sensor = await db[SENSORS_COLLECTION].find_one({"sensor_id": sensor_id})
     if sensor is None:
         raise ValueError(f"Cannot compute trusted value: unknown sensor_id='{sensor_id}'")
 
-    is_trusted = status == SensorStatus.HEALTHY.value
+    is_trusted = status == SensorStatus.HEALTHY.value and recovery_state not in HOLD_STATES
+    extra = None
 
     if is_trusted:
-        # Sensor has proven itself healthy - the raw value already IS
-        # the trusted value. No model needed at all.
-        trusted_value = reading["value"]
+        trusted_value = context.get("calibrated_value", reading["value"])
         source = SOURCE_RAW
     else:
-        model = _get_model()  # raises VirtualSensorUnavailable if untrained
-        history = await _fetch_trusted_history(db, sensor_id, reading["timestamp"])
-        features = compute_virtual_features(
-            reading["timestamp"], sensor["normal_min"], sensor["normal_max"], history
-        )
-        predicted_normalized = float(model.predict([features])[0])
-        trusted_value = denormalize(predicted_normalized, sensor["normal_min"], sensor["normal_max"])
-        source = SOURCE_VIRTUAL
+        redundant = await _redundant_value(db, sensor, reading)
+        if redundant is not None:
+            trusted_value, peers = redundant
+            source, extra = SOURCE_REDUNDANT, {"redundant_sources": peers}
+        else:
+            model = _get_model()  # raises VirtualSensorUnavailable if untrained
+            history = await _fetch_trusted_history(db, sensor_id, reading["timestamp"])
+            need = await _min_history(db)
+            if len(history) < need:
+                raise VirtualSensorUnavailable(
+                    f"Only {len(history)} trusted reading(s) of history for '{sensor_id}' (need {need}); "
+                    "refusing to fabricate a virtual value."
+                )
+            features = compute_virtual_features(
+                reading["timestamp"], sensor["normal_min"], sensor["normal_max"], history
+            )
+            predicted_normalized = float(model.predict([features])[0])
+            trusted_value = denormalize(predicted_normalized, sensor["normal_min"], sensor["normal_max"])
+            source = SOURCE_VIRTUAL
 
-    doc = {
-        "sensor_id": sensor_id,
-        "reading_id": reading["id"],
-        "raw_value": reading["value"],
-        "trusted_value": trusted_value,
-        "source": source,
-        "status_at_prediction": status,
-        "timestamp": reading["timestamp"],
-        "created_at": now_utc(),
-    }
-
-    result = await db[TRUSTED_READINGS_COLLECTION].insert_one(doc)
-    doc["id"] = str(result.inserted_id)
-
+    doc = _build_doc(reading, status, recovery_state, context,
+                     trusted_value=trusted_value, source=source, extra=extra)
     logger.info(
-        "Trusted value sensor=%s status=%s source=%s raw=%s trusted=%.4f",
-        sensor_id, status, source, reading["value"], trusted_value,
+        "Trusted value sensor=%s status=%s recovery=%s source=%s raw=%s trusted=%.4f",
+        sensor_id, status, recovery_state, source, reading["value"], trusted_value,
     )
-    return serialize_mongo_doc(doc)
+    return await _store(db, doc)
+
+
+async def record_unavailable(
+    db: AsyncIOMotorDatabase, reading: dict, status: str,
+    recovery_state: str | None, reason: str, context: dict | None = None,
+) -> dict:
+    """Persist 'no safe trusted value exists' so the dashboard shows it and automation is held."""
+    doc = _build_doc(reading, status, recovery_state, context or {},
+                     trusted_value=None, source=SOURCE_UNAVAILABLE, extra={"unavailable_reason": reason})
+    logger.warning("Trusted value UNAVAILABLE sensor=%s: %s", reading["sensor_id"], reason)
+    return await _store(db, doc)
 
 
 async def list_trusted(

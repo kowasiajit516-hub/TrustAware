@@ -5,6 +5,7 @@ Real dashboard authentication endpoints (Phase 7 addition):
 
     POST /auth/register         - create account, returns a JWT
     POST /auth/login            - verify credentials, returns a JWT
+    POST /auth/google           - verify a Google Identity Services ID token, returns a JWT
     GET  /auth/me                - resolve the current JWT to a user
     POST /auth/forgot-password  - issue a reset token (see note below)
     POST /auth/reset-password   - consume a reset token, set new password
@@ -32,6 +33,7 @@ from models.user import (
     TokenResponse,
     ForgotPasswordRequest,
     ResetPasswordRequest,
+    GoogleLoginRequest,
 )
 from services import auth_service
 from utils.security import decode_access_token
@@ -71,6 +73,24 @@ async def register(payload: UserRegister, db: AsyncIOMotorDatabase = Depends(get
 async def login(payload: UserLogin, db: AsyncIOMotorDatabase = Depends(get_database)):
     """Verify email/password and return a signed access token."""
     user, token = await auth_service.login(db, payload.email, payload.password)
+    return {
+        "access_token": token,
+        "expires_in_minutes": settings.jwt_expire_minutes,
+        "user": user,
+    }
+
+
+@router.post("/google", response_model=TokenResponse)
+async def google_login(payload: GoogleLoginRequest, db: AsyncIOMotorDatabase = Depends(get_database)):
+    """
+    Verify a Google Identity Services ID token and return a signed
+    access token, same shape as /auth/login and /auth/register. If a
+    user with that Google account's email already exists (registered
+    via email/password), they're logged into that same account. If
+    not, a new account is created automatically (auth_provider="google",
+    no password set).
+    """
+    user, token = await auth_service.google_login(db, payload.id_token)
     return {
         "access_token": token,
         "expires_in_minutes": settings.jwt_expire_minutes,

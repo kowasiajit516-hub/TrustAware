@@ -8,8 +8,8 @@ Wires together:
 - MongoDB connection lifecycle (connect on startup, close on shutdown)
 - CORS
 - all routers: sensors, actuators, nodes, automation-rules, readings,
-  predictions, sensor-health, trusted-readings, fault-events,
-  actuator-events, auth, fault-injection
+  predictions (Phase 3), sensor-health (Phase 4), trusted-readings
+  (Phase 5), fault-events (Phase 6)
 
 Run with:
     uvicorn main:app --reload --host 0.0.0.0 --port 8000
@@ -41,6 +41,9 @@ from routes.fault_events import router as fault_events_router
 from routes.actuator_events import router as actuator_events_router
 from routes.auth import router as auth_router
 from routes.fault_injection import router as fault_injection_router
+from routes.settings import router as settings_router
+from routes.learning import router as learning_router
+from routes.dashboard import router as dashboard_router
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -61,29 +64,27 @@ app = FastAPI(
     title="Trust-Aware Self-Healing for IoT Sensor Networks",
     description=(
         "Using Machine Learning and Virtual Sensing. "
-        "Phase 9: the automation engine now closes the core pipeline - "
-        "RAW SENSOR -> VALIDATION -> AI FAULT DETECTION -> DYNAMIC TRUST "
-        "SCORE -> VIRTUAL SENSOR -> TRUSTED VALUE -> AUTOMATION ENGINE -> "
-        "ACTUATOR. services/automation.py evaluates every enabled "
-        "automation_rules document against the sensor's latest TRUSTED "
-        "value only (never raw) and drives actuator state through the new "
-        "services/actuator.py, which only ever touches actuators already "
-        "in AUTO mode - a human's MANUAL command via "
-        "POST /actuators/{id}/command always takes precedence and is "
-        "never overridden by automation. Rules support optional "
-        "hysteresis (reset_threshold/reset_action) to avoid ON/OFF "
-        "flapping right at a single threshold. Automated state changes "
-        "are recorded in actuator_events with sensor_id and trusted_value "
-        "populated, and best-effort dispatched to the actuator's ESP32 "
-        "node exactly like a manual command (Phase 8)."
+        "Phase 7: dynamic dashboard (frontend/) consuming the real "
+        "API built in Phases 1-6, a read-only GET /actuator-events "
+        "endpoint exposing the actuator_events collection (written "
+        "since Phase 1 but never previously readable), real dashboard "
+        "auth (POST /auth/register, /auth/login, /auth/forgot-password, "
+        "/auth/reset-password, GET /auth/me - existing Phase 1-6 routes "
+        "stay unauthenticated so the simulator keeps working), and a "
+        "real POST /fault-injection/{sensor_id} endpoint that drives "
+        "the same SPIKE/STUCK/DRIFT logic simulator.py uses through "
+        "the real ingestion pipeline (no shortcuts)."
     ),
-    version="0.9.0-phase9",
+    version="0.7.0-phase7",
     lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
+    # Dev/LAN: also allow the frontend served from localhost or a private
+    # LAN IP (e.g. http://192.168.0.107:5173 from a phone), any port.
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}):\d+$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -104,6 +105,9 @@ app.include_router(fault_events_router)
 app.include_router(actuator_events_router)
 app.include_router(auth_router)
 app.include_router(fault_injection_router)
+app.include_router(settings_router)
+app.include_router(learning_router)
+app.include_router(dashboard_router)
 
 
 @app.get("/health", tags=["Health"])
@@ -112,8 +116,10 @@ async def health_check():
     return {
         "status": "ok",
         "service": "trust-aware-self-healing-iot-backend",
-        "phase": "Phase 9",
+        "phase": "Phase 7",
         "env": settings.app_env,
+        # Lets the dashboard tell "backend is up but an OLD version is deployed" from "backend is down".
+        "features": {"learning": True, "dashboard": True, "self_healing_overview": True},
     }
 
 

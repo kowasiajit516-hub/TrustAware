@@ -43,6 +43,8 @@ async def test_db():
         "sensors", "actuators", "nodes", "sensor_readings", "sensor_health",
         "predictions", "trusted_readings", "fault_events", "actuator_events",
         "automation_rules", "users", "password_reset_tokens", "node_commands",
+        "sensor_processing", "processed_readings", "learning_sessions", "learning_readings",
+        "invalid_readings",
     ]
     for name in collections:
         await db[name].delete_many({})

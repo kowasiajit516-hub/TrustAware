@@ -84,3 +84,87 @@ async def test_fault_injection_unknown_sensor_404s(client):
         "/fault-injection/DOES_NOT_EXIST", json={"fault_type": "SPIKE"}
     )
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_sudden_offset_shifts_from_midpoint_moderately(client):
+    await client.post("/sensors", json=sample_sensor_payload("FAULT_OFFSET_TYPE_01"))
+
+    resp = await client.post(
+        "/fault-injection/FAULT_OFFSET_TYPE_01", json={"fault_type": "SUDDEN_OFFSET"}
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["fault_type"] == "SUDDEN_OFFSET"
+    # normal range 15.0-40.0, mid=27.5, offset is 15-35% of the 25.0 span
+    # (3.75-8.75), so the value should land noticeably off-center but not
+    # necessarily past the range edge like SPIKE does.
+    assert 15.0 <= data["injected_value"] <= 40.0 or abs(data["injected_value"] - 27.5) >= 3.0
+
+
+@pytest.mark.asyncio
+async def test_frozen_behaves_like_stuck(client):
+    await client.post("/sensors", json=sample_sensor_payload("FAULT_FROZEN_01"))
+    await client.post("/readings", json={"sensor_id": "FAULT_FROZEN_01", "value": 22.2})
+
+    resp = await client.post(
+        "/fault-injection/FAULT_FROZEN_01", json={"fault_type": "FROZEN"}
+    )
+    assert resp.status_code == 201
+    assert resp.json()["injected_value"] == 22.2
+
+
+@pytest.mark.asyncio
+async def test_communication_sends_sentinel_value(client):
+    await client.post("/sensors", json=sample_sensor_payload("FAULT_COMM_01"))
+
+    resp = await client.post(
+        "/fault-injection/FAULT_COMM_01", json={"fault_type": "COMMUNICATION"}
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["injected_value"] == -999.0
+
+    readings_resp = await client.get("/readings", params={"sensor_id": "FAULT_COMM_01"})
+    values = [r["value"] for r in readings_resp.json()]
+    assert -999.0 in values
+
+
+@pytest.mark.asyncio
+async def test_communication_respects_explicit_offset_as_sentinel(client):
+    await client.post("/sensors", json=sample_sensor_payload("FAULT_COMM_02"))
+
+    resp = await client.post(
+        "/fault-injection/FAULT_COMM_02", json={"fault_type": "COMMUNICATION", "offset": -1.0}
+    )
+    assert resp.status_code == 201
+    assert resp.json()["injected_value"] == -1.0
+
+
+@pytest.mark.asyncio
+async def test_missing_submits_no_reading_and_explains_the_real_limitation(client):
+    await client.post("/sensors", json=sample_sensor_payload("FAULT_MISSING_01"))
+    await client.post("/readings", json={"sensor_id": "FAULT_MISSING_01", "value": 27.0})
+
+    resp = await client.post(
+        "/fault-injection/FAULT_MISSING_01", json={"fault_type": "MISSING"}
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["injected_value"] is None
+    assert data["reading"] is None
+    assert data["note"] is not None
+    assert "no reading was submitted" in data["note"].lower()
+
+    # confirm no NEW reading was actually stored - still just the one
+    # from before the MISSING injection
+    readings_resp = await client.get("/readings", params={"sensor_id": "FAULT_MISSING_01"})
+    assert len(readings_resp.json()) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_unknown_sensor_still_404s(client):
+    resp = await client.post(
+        "/fault-injection/DOES_NOT_EXIST_2", json={"fault_type": "MISSING"}
+    )
+    assert resp.status_code == 404
