@@ -88,18 +88,18 @@ export default function ActuatorManagement() {
         title={isEdit ? `Edit Actuator · ${actuatorId}` : "Add Actuator"}
         subtitle="Any actuator type — generic architecture, no per-type backend logic"
       />
-      <div className="p-6 max-w-2xl">
+      <div className="p-6 max-w-5xl grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
         {loading ? (
-          <p className="text-sm text-slate-500">Loading…</p>
+          <p className="text-sm text-[#94A3B8]">Loading…</p>
         ) : (
-          <form onSubmit={handleSubmit} className="card p-6 space-y-4">
+          <form onSubmit={handleSubmit} className="card p-6 space-y-4 lg:col-span-2">
             {error && (
               <div className="text-sm text-status-faulty bg-status-faulty/10 border border-status-faulty/30 rounded-lg px-3 py-2">
                 {error}
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Field label="Actuator ID" required>
                 <input
                   className="input"
@@ -121,7 +121,7 @@ export default function ActuatorManagement() {
               </Field>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Field label="Actuator Type" required>
                 <select
                   className="input"
@@ -146,7 +146,7 @@ export default function ActuatorManagement() {
               </Field>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Field label="Node (optional)">
                 <select
                   className="input"
@@ -169,7 +169,7 @@ export default function ActuatorManagement() {
               </Field>
             </div>
 
-            <label className="flex items-center gap-2 text-sm text-slate-300">
+            <label className="flex items-center gap-2 text-sm text-[#F8FAFC]">
               <input
                 type="checkbox"
                 checked={form.enabled}
@@ -183,29 +183,61 @@ export default function ActuatorManagement() {
               <button
                 type="submit"
                 disabled={saving}
-                className="px-4 py-2 rounded-lg text-sm font-medium bg-gradient-to-r from-accent-blue to-accent-purple text-white hover:opacity-90 disabled:opacity-50"
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-gradient-to-r from-accent-blue to-accent-purple text-white hover:opacity-90 disabled:opacity-50"
               >
                 {saving ? "Saving…" : isEdit ? "Save Changes" : "Add Actuator"}
               </button>
               <button
                 type="button"
                 onClick={() => navigate("/actuators")}
-                className="px-4 py-2 rounded-lg text-sm text-slate-400 hover:text-slate-200"
+                className="px-4 py-2 rounded-lg text-sm font-semibold text-[#94A3B8] hover:text-[#F8FAFC]"
               >
                 Cancel
               </button>
             </div>
           </form>
         )}
+
+        {!loading && (
+          <div className="card p-5 space-y-3">
+            <h3 className="text-sm font-semibold text-[#F8FAFC]">Common Actuator Types</h3>
+            <p className="text-[11px] text-[#94A3B8] -mt-2">
+              You can add any actuator type. No code changes required — this list is just a guide.
+            </p>
+            <div className="space-y-2.5">
+              {ACTUATOR_TYPES.filter((t) => t !== "CUSTOM").map((t) => (
+                <div key={t} className="border-b border-base-border/60 pb-2.5 last:border-0">
+                  <div className="text-xs font-semibold text-[#F8FAFC]">{t}</div>
+                  <div className="text-[11px] text-[#94A3B8]">{ACTUATOR_TYPE_INFO[t]}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
+// Typical purpose per actuator type - purely a reference guide shown
+// next to the form. Doesn't restrict what you can actually enter; the
+// backend accepts any type generically.
+const ACTUATOR_TYPE_INFO = {
+  FAN: "Cooling / ventilation",
+  LED: "Lighting / indication",
+  BUZZER: "Alerts / alarms",
+  PUMP: "Fluid control",
+  RELAY: "Switch control",
+  MOTOR: "Motion control",
+  LIGHT: "Room / area lighting",
+  VALVE: "Flow control",
+  SERVO: "Position control",
+};
+
 function Field({ label, required, children }) {
   return (
     <label className="block">
-      <span className="block text-xs font-medium text-slate-400 mb-1">
+      <span className="block text-xs font-medium text-[#94A3B8] mb-1">
         {label} {required && <span className="text-status-faulty">*</span>}
       </span>
       {children}

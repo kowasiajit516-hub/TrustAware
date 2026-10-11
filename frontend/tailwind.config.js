@@ -4,23 +4,40 @@ export default {
   theme: {
     extend: {
       colors: {
+        // ---------------------------------------------------------
+        // Dashboard theme - professional dark SaaS palette
+        // ---------------------------------------------------------
         base: {
-          bg: "#080c16",
-          panel: "#0d1424",
-          card: "#111a2e",
-          border: "#1c2740",
-          hover: "#16213a",
+          bg: "#0F172A",
+          panel: "#111827",
+          card: "#111827",
+          border: "#243244",
+          hover: "#1E293B",
+          ink: "#F8FAFC",
         },
         accent: {
-          cyan: "#22d3ee",
-          blue: "#3b82f6",
-          purple: "#8b5cf6",
+          cyan: "#38BDF8",
+          blue: "#2563EB",
+          purple: "#1D4ED8",
         },
         status: {
-          healthy: "#22c55e",
-          faulty: "#ef4444",
-          recovering: "#f59e0b",
-          offline: "#64748b",
+          healthy: "#22C55E",
+          faulty: "#EF4444",
+          recovering: "#F59E0B",
+          offline: "#64748B",
+        },
+        // ---------------------------------------------------------
+        // Auth theme - dark navy / electric blue (login/register/
+        // forgot/reset only - never used on dashboard pages)
+        // ---------------------------------------------------------
+        auth: {
+          bg: "#04060c",
+          panel: "#070b16",
+          panel2: "#0b1226",
+          border: "#1c2b4a",
+          blue: "#2563eb",
+          blueLight: "#60a5fa",
+          blueDark: "#1d4ed8",
         },
       },
       fontFamily: {
@@ -28,13 +45,12 @@ export default {
           "Inter",
           "ui-sans-serif",
           "system-ui",
-          "-apple-system",
-          "Segoe UI",
           "sans-serif",
         ],
       },
       boxShadow: {
-        glow: "0 0 24px rgba(34, 211, 238, 0.15)",
+        glow: "0 0 24px rgba(105, 117, 101, 0.18)",
+        authGlow: "0 0 70px rgba(37, 99, 235, 0.35)",
       },
     },
   },

@@ -11,8 +11,8 @@ export default function StatCard({ icon: Icon, label, value, sub, tone = "cyan" 
     <div className="stat-card min-w-[150px]">
       <div>
         <div className="label-eyebrow">{label}</div>
-        <div className="text-2xl font-bold text-slate-100 mt-1">{value}</div>
-        {sub && <div className="text-[11px] text-slate-500 mt-0.5">{sub}</div>}
+        <div className="text-2xl font-bold text-[#F8FAFC] mt-1">{value}</div>
+        {sub && <div className="text-[11px] text-[#94A3B8] mt-0.5">{sub}</div>}
       </div>
       {Icon && (
         <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${toneMap[tone]}`}>

@@ -1,16 +1,76 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Plus, Pencil, Trash2, Power, PowerOff } from "lucide-react";
+import { Plus, Pencil, Trash2, Power, PowerOff, Search, Radio, ShieldCheck, AlertTriangle, RotateCw } from "lucide-react";
 import Topbar from "../components/Topbar.jsx";
+import StatCard from "../components/StatCard.jsx";
 import StatusBadge from "../components/StatusBadge.jsx";
 import TrustBar from "../components/TrustBar.jsx";
+import SensorCard from "../components/SensorCard.jsx";
 import { usePolling } from "../hooks/usePolling.js";
-import { listSensors, deleteSensor, enableSensor, disableSensor } from "../api/client.js";
+import { useIsMobile } from "../hooks/useMediaQuery.js";
+import {
+  listSensors,
+  deleteSensor,
+  enableSensor,
+  disableSensor,
+  getLatestTrustedReading,
+} from "../api/client.js";
 
 export default function Sensors() {
   const { data: sensors, reload } = usePolling(() => listSensors(), [], 5000);
+  const isMobile = useIsMobile();
+
+  // Phone cards show Physical / Trusted / Source per sensor. That comes from
+  // the real latest trusted-reading of each sensor (no bulk endpoint exists),
+  // so it is only fetched on phones - desktop network traffic is unchanged.
+  const cardSensorIds = useMemo(
+    () => (isMobile && sensors ? sensors.slice(0, 30).map((s) => s.sensor_id).join(",") : ""),
+    [isMobile, sensors]
+  );
+  const { data: trustedBySensor } = usePolling(
+    async () => {
+      const ids = cardSensorIds ? cardSensorIds.split(",") : [];
+      const results = await Promise.allSettled(ids.map((id) => getLatestTrustedReading(id)));
+      const map = {};
+      ids.forEach((id, i) => {
+        map[id] = results[i].status === "fulfilled" ? results[i].value : null;
+      });
+      return map;
+    },
+    [cardSensorIds],
+    6000
+  );
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
+  const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+
+  const summary = useMemo(() => {
+    if (!sensors) return null;
+    return {
+      total: sensors.length,
+      healthy: sensors.filter((s) => s.status === "HEALTHY").length,
+      faulty: sensors.filter((s) => s.status === "FAULTY").length,
+      recovering: sensors.filter((s) => s.status === "RECOVERING").length,
+    };
+  }, [sensors]);
+
+  const availableTypes = useMemo(() => {
+    if (!sensors) return [];
+    return [...new Set(sensors.map((s) => s.sensor_type))].sort();
+  }, [sensors]);
+
+  const filteredSensors = useMemo(() => {
+    if (!sensors) return null;
+    const q = search.trim().toLowerCase();
+    return sensors.filter((s) => {
+      if (q && !s.sensor_id.toLowerCase().includes(q) && !s.name.toLowerCase().includes(q)) return false;
+      if (typeFilter && s.sensor_type !== typeFilter) return false;
+      if (statusFilter && s.status !== statusFilter) return false;
+      return true;
+    });
+  }, [sensors, search, typeFilter, statusFilter]);
 
   async function handleDelete(sensorId) {
     if (!confirm(`Delete sensor ${sensorId}? This cannot be undone.`)) return;
@@ -42,17 +102,51 @@ export default function Sensors() {
     <div>
       <Topbar title="Sensors" subtitle="All registered sensors, any type — no code changes required" />
       <div className="p-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-slate-500">
-            {sensors ? `${sensors.length} sensor${sensors.length === 1 ? "" : "s"}` : "Loading…"}
-          </p>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <StatCard icon={Radio} label="Total Sensors" value={summary?.total ?? "—"} tone="cyan" />
+          <StatCard icon={ShieldCheck} label="Healthy" value={summary?.healthy ?? "—"} tone="healthy" />
+          <StatCard icon={AlertTriangle} label="Faulty" value={summary?.faulty ?? "—"} tone="faulty" />
+          <StatCard icon={RotateCw} label="Recovering" value={summary?.recovering ?? "—"} tone="recovering" />
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative flex-1 min-w-[200px] max-w-xs max-lg:max-w-none max-lg:basis-full">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#94A3B8]" />
+            <input
+              className="input pl-9"
+              placeholder="Search sensors…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+          <select className="input max-w-[160px] max-lg:max-w-none max-lg:flex-1" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+            <option value="">All Types</option>
+            {availableTypes.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+          <select className="input max-w-[160px] max-lg:max-w-none max-lg:flex-1" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+            <option value="">All Status</option>
+            <option value="HEALTHY">Healthy</option>
+            <option value="RECOVERING">Recovering</option>
+            <option value="FAULTY">Faulty</option>
+            <option value="OFFLINE">Offline</option>
+          </select>
           <Link
             to="/sensors/new"
-            className="inline-flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg bg-gradient-to-r from-accent-blue to-accent-purple text-white hover:opacity-90"
+            className="order-first w-full justify-center min-h-[44px] lg:min-h-0 sm:order-none sm:w-auto sm:ml-auto inline-flex items-center gap-1.5 text-sm font-semibold px-3 py-2 rounded-lg bg-gradient-to-r from-accent-blue to-accent-purple text-white hover:opacity-90"
           >
             <Plus size={16} /> Add Sensor
           </Link>
         </div>
+
+        <p className="text-xs text-[#94A3B8]">
+          {filteredSensors
+            ? `${filteredSensors.length} of ${sensors.length} sensor${sensors.length === 1 ? "" : "s"}`
+            : "Loading…"}
+        </p>
 
         {error && (
           <div className="text-sm text-status-faulty bg-status-faulty/10 border border-status-faulty/30 rounded-lg px-3 py-2">
@@ -60,65 +154,102 @@ export default function Sensors() {
           </div>
         )}
 
-        <div className="card overflow-hidden">
+        {/* Phones / small tablets: one card per sensor */}
+        <div className="lg:hidden space-y-3">
+          {!filteredSensors && (
+            <p className="text-center text-sm text-[#94A3B8] py-8">Loading sensors…</p>
+          )}
+          {filteredSensors && filteredSensors.length === 0 && (
+            <div className="card p-6 text-center text-sm text-[#94A3B8]">
+              {sensors.length === 0 ? (
+                <>
+                  No sensors yet.{" "}
+                  <Link to="/sensors/new" className="text-accent-cyan hover:underline">
+                    Add your first sensor →
+                  </Link>
+                </>
+              ) : (
+                "No sensors match these filters."
+              )}
+            </div>
+          )}
+          {filteredSensors?.map((s) => (
+            <SensorCard
+              key={s.sensor_id}
+              sensor={s}
+              trusted={trustedBySensor?.[s.sensor_id] ?? null}
+              busy={busy === s.sensor_id}
+              onToggle={handleToggle}
+              onDelete={handleDelete}
+            />
+          ))}
+        </div>
+
+        <div className="hidden lg:block card overflow-hidden">
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-left text-slate-500 text-xs border-b border-base-border bg-base-bg/40">
-                <th className="py-3 px-4 font-medium">Sensor ID</th>
-                <th className="py-3 px-4 font-medium">Name</th>
-                <th className="py-3 px-4 font-medium">Type</th>
-                <th className="py-3 px-4 font-medium">Location</th>
-                <th className="py-3 px-4 font-medium">Status</th>
-                <th className="py-3 px-4 font-medium w-40">Trust</th>
-                <th className="py-3 px-4 font-medium">Enabled</th>
-                <th className="py-3 px-4 font-medium text-right">Actions</th>
+              <tr className="text-left text-[#94A3B8] text-xs border-b border-base-border bg-base-bg/40">
+                <th className="py-2 px-4 font-medium">Sensor ID</th>
+                <th className="py-2 px-4 font-medium">Name</th>
+                <th className="py-2 px-4 font-medium">Type</th>
+                <th className="py-2 px-4 font-medium">Location</th>
+                <th className="py-2 px-4 font-medium">Status</th>
+                <th className="py-2 px-4 font-medium w-40">Trust</th>
+                <th className="py-2 px-4 font-medium">Enabled</th>
+                <th className="py-2 px-4 font-medium text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {!sensors && (
+              {!filteredSensors && (
                 <tr>
-                  <td colSpan={8} className="py-8 text-center text-slate-500">
+                  <td colSpan={8} className="py-8 text-center text-[#94A3B8]">
                     Loading sensors…
                   </td>
                 </tr>
               )}
-              {sensors && sensors.length === 0 && (
+              {filteredSensors && filteredSensors.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="py-10 text-center text-slate-500">
-                    No sensors yet.{" "}
-                    <Link to="/sensors/new" className="text-accent-cyan hover:underline">
-                      Add your first sensor →
-                    </Link>
+                  <td colSpan={8} className="py-10 text-center text-[#94A3B8]">
+                    {sensors.length === 0 ? (
+                      <>
+                        No sensors yet.{" "}
+                        <Link to="/sensors/new" className="text-accent-cyan hover:underline">
+                          Add your first sensor →
+                        </Link>
+                      </>
+                    ) : (
+                      "No sensors match these filters."
+                    )}
                   </td>
                 </tr>
               )}
-              {sensors?.map((s) => (
+              {filteredSensors?.map((s) => (
                 <tr key={s.sensor_id} className="border-b border-base-border/60 last:border-0 hover:bg-base-hover/50">
-                  <td className="py-3 px-4 font-semibold text-slate-100">{s.sensor_id}</td>
-                  <td className="py-3 px-4 text-slate-300">{s.name}</td>
-                  <td className="py-3 px-4 text-slate-400">{s.sensor_type}</td>
-                  <td className="py-3 px-4 text-slate-400">{s.location}</td>
-                  <td className="py-3 px-4">
+                  <td className="py-2 px-4 font-semibold text-[#F8FAFC]">{s.sensor_id}</td>
+                  <td className="py-2 px-4 text-[#F8FAFC]">{s.name}</td>
+                  <td className="py-2 px-4 text-[#94A3B8]">{s.sensor_type}</td>
+                  <td className="py-2 px-4 text-[#94A3B8]">{s.location}</td>
+                  <td className="py-2 px-4">
                     <StatusBadge status={s.status} />
                   </td>
-                  <td className="py-3 px-4">
+                  <td className="py-2 px-4">
                     <TrustBar score={s.trust_score} />
                   </td>
-                  <td className="py-3 px-4">
+                  <td className="py-2 px-4">
                     <button
                       disabled={busy === s.sensor_id}
                       onClick={() => handleToggle(s)}
-                      className="text-slate-400 hover:text-slate-200 disabled:opacity-40"
+                      className="text-[#94A3B8] hover:text-[#F8FAFC] disabled:opacity-40"
                       title={s.enabled ? "Disable" : "Enable"}
                     >
                       {s.enabled ? <Power size={16} className="text-status-healthy" /> : <PowerOff size={16} />}
                     </button>
                   </td>
-                  <td className="py-3 px-4">
+                  <td className="py-2 px-4">
                     <div className="flex items-center justify-end gap-2">
                       <Link
                         to={`/sensors/${s.sensor_id}/edit`}
-                        className="p-1.5 rounded-md hover:bg-base-hover text-slate-400 hover:text-accent-cyan"
+                        className="p-1.5 rounded-md hover:bg-base-hover text-[#94A3B8] hover:text-accent-cyan"
                         title="Edit"
                       >
                         <Pencil size={15} />
@@ -126,7 +257,7 @@ export default function Sensors() {
                       <button
                         disabled={busy === s.sensor_id}
                         onClick={() => handleDelete(s.sensor_id)}
-                        className="p-1.5 rounded-md hover:bg-base-hover text-slate-400 hover:text-status-faulty disabled:opacity-40"
+                        className="p-1.5 rounded-md hover:bg-base-hover text-[#94A3B8] hover:text-status-faulty disabled:opacity-40"
                         title="Delete"
                       >
                         <Trash2 size={15} />

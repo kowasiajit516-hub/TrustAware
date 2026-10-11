@@ -1,11 +1,15 @@
 import { useEffect, useState } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2, Pencil, ToggleLeft, ToggleRight } from "lucide-react";
 import Topbar from "../components/Topbar.jsx";
+import StatusBadge from "../components/StatusBadge.jsx";
+import AutomationRuleCard from "../components/AutomationRuleCard.jsx";
+import { conditionSymbol } from "../utils/format.js";
 import { usePolling } from "../hooks/usePolling.js";
 import {
   listRules,
   deleteRule,
   createRule,
+  updateRule,
   listSensors,
   listActuators,
 } from "../api/client.js";
@@ -31,10 +35,12 @@ export default function Automation() {
   const [sensors, setSensors] = useState([]);
   const [actuators, setActuators] = useState([]);
   const [showForm, setShowForm] = useState(false);
+  const [editingRuleId, setEditingRuleId] = useState(null);
   const [form, setForm] = useState(EMPTY);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(null);
+  const isEdit = editingRuleId !== null;
 
   useEffect(() => {
     listSensors().then(setSensors).catch(() => setSensors([]));
@@ -45,19 +51,61 @@ export default function Automation() {
     setForm((f) => ({ ...f, [field]: value }));
   }
 
-  async function handleCreate(e) {
+  function scrollToFormOnPhone() {
+    if (window.matchMedia("(max-width: 1023.98px)").matches) window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function openCreateForm() {
+    scrollToFormOnPhone();
+    setEditingRuleId(null);
+    setForm(EMPTY);
+    setError(null);
+    setShowForm(true);
+  }
+
+  function openEditForm(rule) {
+    scrollToFormOnPhone();
+    setEditingRuleId(rule.rule_id);
+    setForm({
+      rule_id: rule.rule_id,
+      name: rule.name,
+      sensor_id: rule.sensor_id,
+      actuator_id: rule.actuator_id,
+      condition: rule.condition,
+      threshold: rule.threshold,
+      action: rule.action,
+      reset_threshold: rule.reset_threshold ?? "",
+      reset_action: rule.reset_action ?? "",
+      enabled: rule.enabled,
+    });
+    setError(null);
+    setShowForm(true);
+  }
+
+  function closeForm() {
+    setShowForm(false);
+    setEditingRuleId(null);
+    setForm(EMPTY);
+  }
+
+  async function handleSubmit(e) {
     e.preventDefault();
     setError(null);
     setSaving(true);
     try {
-      await createRule({
+      const payload = {
         ...form,
         threshold: Number(form.threshold),
         reset_threshold: form.reset_threshold === "" ? null : Number(form.reset_threshold),
         reset_action: form.reset_action === "" ? null : form.reset_action,
-      });
-      setForm(EMPTY);
-      setShowForm(false);
+      };
+      if (isEdit) {
+        const { rule_id, ...updatable } = payload;
+        await updateRule(editingRuleId, updatable);
+      } else {
+        await createRule(payload);
+      }
+      closeForm();
       await reload();
     } catch (err) {
       setError(err.detail || err.message);
@@ -79,6 +127,18 @@ export default function Automation() {
     }
   }
 
+  async function handleToggleEnabled(rule) {
+    setBusy(rule.rule_id);
+    try {
+      await updateRule(rule.rule_id, { enabled: !rule.enabled });
+      await reload();
+    } catch (err) {
+      setError(err.detail || err.message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <div>
       <Topbar
@@ -87,12 +147,12 @@ export default function Automation() {
       />
       <div className="p-6 space-y-4">
         <div className="flex items-center justify-between">
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-[#94A3B8]">
             {rules ? `${rules.length} rule${rules.length === 1 ? "" : "s"}` : "Loading…"}
           </p>
           <button
-            onClick={() => setShowForm((v) => !v)}
-            className="inline-flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg bg-gradient-to-r from-accent-blue to-accent-purple text-white hover:opacity-90"
+            onClick={openCreateForm}
+            className="min-h-[44px] lg:min-h-0 inline-flex items-center gap-1.5 text-sm font-semibold px-3 py-2 rounded-lg bg-gradient-to-r from-accent-blue to-accent-purple text-white hover:opacity-90"
           >
             <Plus size={16} /> New Rule
           </button>
@@ -105,16 +165,22 @@ export default function Automation() {
         )}
 
         {showForm && (
-          <form onSubmit={handleCreate} className="card p-5 space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+          <form onSubmit={handleSubmit} className="card p-5 space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Field label="Rule ID" required>
-                <input className="input" value={form.rule_id} onChange={(e) => set("rule_id", e.target.value)} required />
+                <input
+                  className="input"
+                  value={form.rule_id}
+                  disabled={isEdit}
+                  onChange={(e) => set("rule_id", e.target.value)}
+                  required
+                />
               </Field>
               <Field label="Name" required>
                 <input className="input" value={form.name} onChange={(e) => set("name", e.target.value)} required />
               </Field>
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Field label="Sensor" required>
                 <select className="input" value={form.sensor_id} onChange={(e) => set("sensor_id", e.target.value)} required>
                   <option value="">— Select —</option>
@@ -136,7 +202,7 @@ export default function Automation() {
                 </select>
               </Field>
             </div>
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <Field label="Condition">
                 <select className="input" value={form.condition} onChange={(e) => set("condition", e.target.value)}>
                   {CONDITIONS.map((c) => (
@@ -159,7 +225,7 @@ export default function Automation() {
                 </select>
               </Field>
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Field label="Reset Threshold (optional)">
                 <input type="number" step="any" className="input" value={form.reset_threshold} onChange={(e) => set("reset_threshold", e.target.value)} />
               </Field>
@@ -174,64 +240,108 @@ export default function Automation() {
                 </select>
               </Field>
             </div>
+            <RulePreview form={form} sensor={sensors.find((s) => s.sensor_id === form.sensor_id)} />
             <div className="flex items-center gap-3">
-              <button type="submit" disabled={saving} className="px-4 py-2 rounded-lg text-sm font-medium bg-gradient-to-r from-accent-blue to-accent-purple text-white hover:opacity-90 disabled:opacity-50">
-                {saving ? "Saving…" : "Create Rule"}
+              <button type="submit" disabled={saving} className="px-4 py-2 rounded-lg text-sm font-semibold bg-gradient-to-r from-accent-blue to-accent-purple text-white hover:opacity-90 disabled:opacity-50">
+                {saving ? "Saving…" : isEdit ? "Save Changes" : "Create Rule"}
               </button>
-              <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 rounded-lg text-sm text-slate-400 hover:text-slate-200">
+              <button type="button" onClick={closeForm} className="px-4 py-2 rounded-lg text-sm font-semibold text-[#94A3B8] hover:text-[#F8FAFC]">
                 Cancel
               </button>
             </div>
           </form>
         )}
 
-        <div className="card overflow-hidden">
+        {/* Phones / small tablets: one card per rule */}
+        <div className="lg:hidden space-y-3">
+          {!rules && <p className="text-center text-sm text-[#94A3B8] py-8">Loading rules…</p>}
+          {rules && rules.length === 0 && (
+            <div className="card p-6 text-center text-sm text-[#94A3B8]">No automation rules yet.</div>
+          )}
+          {rules?.map((r) => (
+            <AutomationRuleCard
+              key={r.rule_id}
+              rule={r}
+              sensor={sensors.find((s) => s.sensor_id === r.sensor_id)}
+              busy={busy === r.rule_id}
+              onToggle={handleToggleEnabled}
+              onEdit={openEditForm}
+              onDelete={handleDelete}
+            />
+          ))}
+        </div>
+
+        <div className="hidden lg:block card overflow-hidden">
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-left text-slate-500 text-xs border-b border-base-border bg-base-bg/40">
-                <th className="py-3 px-4 font-medium">Rule ID</th>
-                <th className="py-3 px-4 font-medium">Name</th>
-                <th className="py-3 px-4 font-medium">Sensor</th>
-                <th className="py-3 px-4 font-medium">Condition</th>
-                <th className="py-3 px-4 font-medium">Actuator</th>
-                <th className="py-3 px-4 font-medium">Action</th>
-                <th className="py-3 px-4 font-medium text-right">Actions</th>
+              <tr className="text-left text-[#94A3B8] text-xs border-b border-base-border bg-base-bg/40">
+                <th className="py-2 px-4 font-medium">Rule ID</th>
+                <th className="py-2 px-4 font-medium">Name</th>
+                <th className="py-2 px-4 font-medium">Sensor</th>
+                <th className="py-2 px-4 font-medium">Condition</th>
+                <th className="py-2 px-4 font-medium">Actuator</th>
+                <th className="py-2 px-4 font-medium">Action</th>
+                <th className="py-2 px-4 font-medium">Enabled</th>
+                <th className="py-2 px-4 font-medium text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
               {!rules && (
                 <tr>
-                  <td colSpan={7} className="py-8 text-center text-slate-500">
+                  <td colSpan={8} className="py-8 text-center text-[#94A3B8]">
                     Loading rules…
                   </td>
                 </tr>
               )}
               {rules && rules.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="py-10 text-center text-slate-500">
+                  <td colSpan={8} className="py-10 text-center text-[#94A3B8]">
                     No automation rules yet.
                   </td>
                 </tr>
               )}
               {rules?.map((r) => (
                 <tr key={r.rule_id} className="border-b border-base-border/60 last:border-0 hover:bg-base-hover/50">
-                  <td className="py-3 px-4 font-semibold text-slate-100">{r.rule_id}</td>
-                  <td className="py-3 px-4 text-slate-300">{r.name}</td>
-                  <td className="py-3 px-4 text-slate-400">{r.sensor_id}</td>
-                  <td className="py-3 px-4 text-slate-400">
+                  <td className="py-2 px-4 font-semibold text-[#F8FAFC]">{r.rule_id}</td>
+                  <td className="py-2 px-4 text-[#F8FAFC]">{r.name}</td>
+                  <td className="py-2 px-4 text-[#94A3B8]">{r.sensor_id}</td>
+                  <td className="py-2 px-4 text-[#94A3B8]">
                     {r.condition.replaceAll("_", " ").toLowerCase()} {r.threshold}
                   </td>
-                  <td className="py-3 px-4 text-slate-400">{r.actuator_id}</td>
-                  <td className="py-3 px-4 text-slate-400">{r.action}</td>
-                  <td className="py-3 px-4 text-right">
+                  <td className="py-2 px-4 text-[#94A3B8]">{r.actuator_id}</td>
+                  <td className="py-2 px-4 text-[#94A3B8]">{r.action}</td>
+                  <td className="py-2 px-4">
                     <button
                       disabled={busy === r.rule_id}
-                      onClick={() => handleDelete(r.rule_id)}
-                      className="p-1.5 rounded-md hover:bg-base-hover text-slate-400 hover:text-status-faulty disabled:opacity-40"
-                      title="Delete"
+                      onClick={() => handleToggleEnabled(r)}
+                      className="text-[#94A3B8] hover:text-[#F8FAFC] disabled:opacity-40"
+                      title={r.enabled ? "Disable rule" : "Enable rule"}
                     >
-                      <Trash2 size={15} />
+                      {r.enabled ? (
+                        <ToggleRight size={20} className="text-status-healthy" />
+                      ) : (
+                        <ToggleLeft size={20} />
+                      )}
                     </button>
+                  </td>
+                  <td className="py-2 px-4 text-right">
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => openEditForm(r)}
+                        className="p-1.5 rounded-md hover:bg-base-hover text-[#94A3B8] hover:text-accent-cyan"
+                        title="Edit"
+                      >
+                        <Pencil size={15} />
+                      </button>
+                      <button
+                        disabled={busy === r.rule_id}
+                        onClick={() => handleDelete(r.rule_id)}
+                        className="p-1.5 rounded-md hover:bg-base-hover text-[#94A3B8] hover:text-status-faulty disabled:opacity-40"
+                        title="Delete"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -243,10 +353,51 @@ export default function Automation() {
   );
 }
 
+// Live, read-only preview of the rule being built. Built purely from the
+// form's current values; the reset line only states the reset threshold and
+// action (the backend owns the exact hysteresis semantics).
+function RulePreview({ form, sensor }) {
+  const unit = sensor?.unit || "";
+  const sensorLabel = form.sensor_id || "sensor";
+  const actuatorLabel = form.actuator_id || "actuator";
+  const hasReset = form.reset_threshold !== "" && form.reset_action !== "";
+  return (
+    <div className="rounded-lg border border-base-border bg-base-bg/60 p-3 text-xs font-mono space-y-1" aria-live="polite">
+      <div className="label-eyebrow mb-1 font-sans">Rule preview</div>
+      <div className="flex flex-wrap items-center gap-x-1.5">
+        <span className="text-accent-cyan font-semibold">IF</span>
+        <span className="text-[#F8FAFC] break-all">trusted {sensorLabel}</span>
+        <span className="text-accent-cyan font-semibold">{conditionSymbol(form.condition)}</span>
+        <span className="text-[#F8FAFC]">
+          {form.threshold === "" ? "?" : form.threshold}
+          {unit}
+        </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-1.5">
+        <span className="text-accent-purple font-semibold">THEN</span>
+        <span className="text-[#F8FAFC] break-all">{actuatorLabel}</span>
+        <span className="text-[#94A3B8]">=</span>
+        <StatusBadge status={form.action} />
+      </div>
+      {hasReset && (
+        <div className="flex flex-wrap items-center gap-x-1.5 pt-1 border-t border-base-border/60">
+          <span className="text-[#94A3B8] font-semibold">RESET</span>
+          <span className="text-[#F8FAFC]">
+            at {form.reset_threshold}
+            {unit}
+          </span>
+          <span className="text-[#94A3B8]">→</span>
+          <StatusBadge status={form.reset_action} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Field({ label, required, children }) {
   return (
     <label className="block">
-      <span className="block text-xs font-medium text-slate-400 mb-1">
+      <span className="block text-xs font-medium text-[#94A3B8] mb-1">
         {label} {required && <span className="text-status-faulty">*</span>}
       </span>
       {children}

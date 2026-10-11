@@ -110,18 +110,18 @@ export default function SensorManagement() {
         title={isEdit ? `Edit Sensor · ${sensorId}` : "Add Sensor"}
         subtitle="Any sensor type — the backend never hardcodes per-type logic"
       />
-      <div className="p-6 max-w-2xl">
+      <div className="p-6 max-w-5xl grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
         {loading ? (
-          <p className="text-sm text-slate-500">Loading…</p>
+          <p className="text-sm text-[#94A3B8]">Loading…</p>
         ) : (
-          <form onSubmit={handleSubmit} className="card p-6 space-y-4">
+          <form onSubmit={handleSubmit} className="card p-6 space-y-4 lg:col-span-2">
             {error && (
               <div className="text-sm text-status-faulty bg-status-faulty/10 border border-status-faulty/30 rounded-lg px-3 py-2">
                 {error}
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Field label="Sensor ID" required>
                 <input
                   className="input"
@@ -143,7 +143,7 @@ export default function SensorManagement() {
               </Field>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Field label="Sensor Type" required>
                 <select
                   className="input"
@@ -168,7 +168,7 @@ export default function SensorManagement() {
               </Field>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Field label="Location" required>
                 <input
                   className="input"
@@ -194,7 +194,7 @@ export default function SensorManagement() {
               </Field>
             </div>
 
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <Field label="Normal Min" required>
                 <input
                   type="number"
@@ -227,7 +227,7 @@ export default function SensorManagement() {
               </Field>
             </div>
 
-            <label className="flex items-center gap-2 text-sm text-slate-300">
+            <label className="flex items-center gap-2 text-sm text-[#F8FAFC]">
               <input
                 type="checkbox"
                 checked={form.enabled}
@@ -241,29 +241,70 @@ export default function SensorManagement() {
               <button
                 type="submit"
                 disabled={saving}
-                className="px-4 py-2 rounded-lg text-sm font-medium bg-gradient-to-r from-accent-blue to-accent-purple text-white hover:opacity-90 disabled:opacity-50"
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-gradient-to-r from-accent-blue to-accent-purple text-white hover:opacity-90 disabled:opacity-50"
               >
                 {saving ? "Saving…" : isEdit ? "Save Changes" : "Add Sensor"}
               </button>
               <button
                 type="button"
                 onClick={() => navigate("/sensors")}
-                className="px-4 py-2 rounded-lg text-sm text-slate-400 hover:text-slate-200"
+                className="px-4 py-2 rounded-lg text-sm font-semibold text-[#94A3B8] hover:text-[#F8FAFC]"
               >
                 Cancel
               </button>
             </div>
           </form>
         )}
+
+        {!loading && (
+          <div className="card p-5 space-y-3">
+            <h3 className="text-sm font-semibold text-[#F8FAFC]">Sensor Type Reference</h3>
+            <p className="text-[11px] text-[#94A3B8] -mt-2">
+              You can add any sensor type. No code changes required — this list is just a guide.
+            </p>
+            <div className="space-y-2.5 max-h-[420px] overflow-y-auto pr-1">
+              {SENSOR_TYPES.filter((t) => t !== "CUSTOM").map((t) => {
+                const info = SENSOR_TYPE_INFO[t];
+                return (
+                  <div key={t} className="border-b border-base-border/60 pb-2.5 last:border-0">
+                    <div className="text-xs font-semibold text-[#F8FAFC]">{t}</div>
+                    <div className="text-[11px] text-[#94A3B8]">
+                      {info.unit} · {info.examples}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
+// Typical unit and example use-cases per sensor type - purely a
+// reference guide shown next to the form. It doesn't restrict what
+// you can actually enter for Unit/Type; the backend accepts any type.
+const SENSOR_TYPE_INFO = {
+  TEMPERATURE: { unit: "°C", examples: "Room, equipment" },
+  HUMIDITY: { unit: "%", examples: "Environment" },
+  LIGHT: { unit: "lux", examples: "Indoor / outdoor" },
+  GAS: { unit: "ppm", examples: "Air quality" },
+  SMOKE: { unit: "ppm / boolean", examples: "Fire safety" },
+  PRESSURE: { unit: "kPa / bar", examples: "HVAC, pipelines" },
+  AIR_QUALITY: { unit: "AQI / ppm", examples: "Indoor air monitoring" },
+  SOIL_MOISTURE: { unit: "%", examples: "Agriculture, irrigation" },
+  VIBRATION: { unit: "mm/s / g", examples: "Machinery health" },
+  WATER_LEVEL: { unit: "cm / %", examples: "Tanks, flood detection" },
+  MOTION: { unit: "boolean", examples: "Security" },
+  CURRENT: { unit: "A", examples: "Power monitoring" },
+  VOLTAGE: { unit: "V", examples: "Power monitoring" },
+};
+
 function Field({ label, required, children }) {
   return (
     <label className="block">
-      <span className="block text-xs font-medium text-slate-400 mb-1">
+      <span className="block text-xs font-medium text-[#94A3B8] mb-1">
         {label} {required && <span className="text-status-faulty">*</span>}
       </span>
       {children}
